@@ -2,30 +2,25 @@
 
 # sanity checks and defaults
 
-# if running as root, no need to use sudo
 if [ "$UID" = "0" ]; then
+    SUDO=""
+elif docker info > /dev/null 2>&1; then
     SUDO=""
 else
     SUDO=$(which sudo 2>/dev/null)
-    if [ ! -x "$SUDO" ]; then
-	echo "\`sudo\` is required to run the script!"
+    if [ ! -x "$SUDO" ] || ! $SUDO docker info > /dev/null 2>&1; then
+	echo "Cannot access the Docker daemon. Start Docker Desktop or run with sufficient privileges."
 	exit 1
     fi
 fi
 
-# check for docker-compose
-DOCKER_COMPOSE=$(which docker-compose 2>/dev/null)
-if [ ! -x "$DOCKER_COMPOSE" ]; then
-
-    # try to run docker compose
-    `docker compose > /dev/null 2>&1`
-    if [ $? -eq 0 ]; then
-	DOCKER_COMPOSE="docker compose"
-	echo "Using \`docker compose\`"
-    else
-	echo "\`docker-compose\` not installed, cannot proceed"
-	exit 2
-    fi
+if docker compose version > /dev/null 2>&1; then
+    DOCKER_COMPOSE="docker compose"
+elif DOCKER_COMPOSE=$(which docker-compose 2>/dev/null) && [ -x "$DOCKER_COMPOSE" ]; then
+    :
+else
+    echo "\`docker compose\` not installed, cannot proceed"
+    exit 2
 fi
 
 
@@ -57,48 +52,41 @@ if [ ! -f "Dockerfile" ]; then
     exit 4
 fi
 
-# Check if image exists locally
-DOCKER_IMAGE_NAME=$(docker-compose config | grep 'image:' | awk '{print $2}' | head -n 1)
-IMAGE_EXISTS=$(docker images -q "$DOCKER_IMAGE_NAME")
+DOCKER_IMAGE_NAME=$($SUDO $DOCKER_COMPOSE config --images 2>/dev/null | head -n 1)
+IMAGE_EXISTS=$($SUDO docker images -q "$DOCKER_IMAGE_NAME" 2>/dev/null)
 
 if [ -n "$FORCE_REBUILD" ]; then
 	echo "FORCE_REBUILD is set. Rebuilding image $DOCKER_IMAGE_NAME..."
     $SUDO $DOCKER_COMPOSE build --force-rm --no-cache
 elif [ -z "$IMAGE_EXISTS" ]; then
-    # If the image doesn't exist, build it
     echo "Building the Docker image $DOCKER_IMAGE_NAME..."
     $SUDO $DOCKER_COMPOSE build --force-rm --no-cache
 else
     echo "Docker image $DOCKER_IMAGE_NAME already exists. Skipping build."
 fi
 
-# now start the container
-DOCKER_CONTAINER_NAME="${DOCKER_IMAGE_TO_RUN}-learn_postgresql-1"
 $SUDO $DOCKER_COMPOSE up -d --remove-orphans
 
-# now build the container
-# DOCKER_CONTAINER_NAME=${DOCKER_IMAGE_TO_RUN}_learn_postgresql_1
-# Compatibility with composev2
-# DOCKER_CONTAINER_NAME="${DOCKER_IMAGE_TO_RUN}-learn_postgresql-1"
-# $SUDO $DOCKER_COMPOSE build --force-rm --no-cache
-# $SUDO $DOCKER_COMPOSE up -d --remove-orphans
-
 if [ $? -ne 0 ]; then
-    echo "Cannot start the container $DOCKER_CONTAINER_NAME"
+    echo "Cannot start the PostgreSQL container"
     exit 10
 fi
 
-
-DOCKER_ID=$($SUDO docker ps -qf "name=$DOCKER_CONTAINER_NAME" | awk '{print $1;}' )
+DOCKER_ID=$($SUDO $DOCKER_COMPOSE ps -q learn_postgresql)
+if [ -z "$DOCKER_ID" ]; then
+    echo "Cannot find running PostgreSQL container"
+    exit 10
+fi
+DOCKER_CONTAINER_NAME=$($SUDO docker inspect --format '{{.Name}}' "$DOCKER_ID" | sed 's|^/||')
 
 
 SECS=5
 echo "Waiting $SECS secs for the container <$DOCKER_CONTAINER_NAME> -> <$DOCKER_ID> to complete starting up..."
 sleep $SECS
 
-if [ "$DOCKER_CONTAINER_NAME" = "chapter9_learn_postgresql_1" ]; then
+if [ "$DOCKER_IMAGE_TO_RUN" = "chapter_09" ]; then
 	echo "chown on tablespaces directories"
-	$SUDO docker exec $DOCKER_CONTAINER_NAME chown -R postgres:postgres /data
+	$SUDO docker exec "$DOCKER_ID" chown -R postgres:postgres /data
 fi
 
 $SUDO docker exec --user postgres --workdir /var/lib/postgresql -it  $DOCKER_ID /bin/bash
